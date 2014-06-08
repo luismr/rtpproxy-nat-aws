@@ -98,7 +98,9 @@ usage(void)
     fprintf(stderr, "usage: rtpproxy [-2fvFiPa] [-l addr1[/addr2]] "
       "[-6 addr1[/addr2]] [-s path]\n\t[-t tos] [-r rdir [-S sdir]] [-T ttl] "
       "[-L nfiles] [-m port_min]\n\t[-M port_max] [-u uname[:gname]] "
-      "[-n timeout_socket] [-d log_level[:log_facility]]\n");
+      "[-n timeout_socket] [-d log_level[:log_facility]] "
+      "[-A addr1[/addr2]]\n"
+      );
     exit(1);
 }
 
@@ -133,6 +135,9 @@ init_config(struct cfg *cf, int argc, char **argv)
     cf->port_min = PORT_MIN;
     cf->port_max = PORT_MAX;
 
+    cf->advaddr[0] = NULL;
+    cf->advaddr[1] = NULL;
+
     cf->max_ttl = SESSION_TIMEOUT;
     cf->tos = TOS;
     cf->rrtcp = 1;
@@ -144,218 +149,285 @@ init_config(struct cfg *cf, int argc, char **argv)
     cf->timeout_handler.fd = -1;
     cf->timeout_handler.connected = 0;
 
-    if (getrlimit(RLIMIT_NOFILE, &(cf->nofile_limit)) != 0)
-	err(1, "getrlimit");
-
-    while ((ch = getopt(argc, argv, "vf2Rl:6:s:S:t:r:p:T:L:m:M:u:Fin:Pad:")) != -1)
-	switch (ch) {
-	case 'f':
-	    cf->nodaemon = 1;
-	    break;
-
-	case 'l':
-	    bh[0] = optarg;
-	    bh[1] = strchr(bh[0], '/');
-	    if (bh[1] != NULL) {
-		*bh[1] = '\0';
-		bh[1]++;
-		cf->bmode = 1;
-	    }
-	    break;
-
-	case '6':
-	    bh6[0] = optarg;
-	    bh6[1] = strchr(bh6[0], '/');
-	    if (bh6[1] != NULL) {
-		*bh6[1] = '\0';
-		bh6[1]++;
-		cf->bmode = 1;
-	    }
-	    break;
-
-	case 's':
-	    if (strncmp("udp:", optarg, 4) == 0) {
-		cf->umode = 1;
-		optarg += 4;
-	    } else if (strncmp("udp6:", optarg, 5) == 0) {
-		cf->umode = 6;
-		optarg += 5;
-	    } else if (strncmp("unix:", optarg, 5) == 0) {
-		cf->umode = 0;
-		optarg += 5;
-	    }
-	    cmd_sock = optarg;
-	    break;
-
-	case 't':
-	    cf->tos = atoi(optarg);
-	    if (cf->tos > 255)
-		errx(1, "%d: TOS is too large", cf->tos);
-	    break;
-
-	case '2':
-	    cf->dmode = 1;
-	    break;
-
-	case 'v':
-	    printf("Basic version: %d\n", CPROTOVER);
-	    for (i = 1; proto_caps[i].pc_id != NULL; ++i) {
-		printf("Extension %s: %s\n", proto_caps[i].pc_id,
-		    proto_caps[i].pc_description);
-	    }
-	    exit(0);
-	    break;
-
-	case 'r':
-	    cf->rdir = optarg;
-	    break;
-
-	case 'S':
-	    cf->sdir = optarg;
-	    break;
-
-	case 'R':
-	    cf->rrtcp = 0;
-	    break;
-
-	case 'p':
-	    pid_file = optarg;
-	    break;
-
-	case 'T':
-	    cf->max_ttl = atoi(optarg);
-	    break;
-
-	case 'L':
-	    cf->nofile_limit.rlim_cur = cf->nofile_limit.rlim_max = atoi(optarg);
-	    if (setrlimit(RLIMIT_NOFILE, &(cf->nofile_limit)) != 0)
-		err(1, "setrlimit");
-	    if (getrlimit(RLIMIT_NOFILE, &(cf->nofile_limit)) != 0)
+    if (getrlimit(RLIMIT_NOFILE, &(cf->nofile_limit)) != 0) {
 		err(1, "getrlimit");
-	    if (cf->nofile_limit.rlim_max < atoi(optarg))
-		warnx("limit allocated by setrlimit (%d) is less than "
-		  "requested (%d)", (int) cf->nofile_limit.rlim_max,
-		  atoi(optarg));
-	    break;
-
-	case 'm':
-	    cf->port_min = atoi(optarg);
-	    break;
-
-	case 'M':
-	    cf->port_max = atoi(optarg);
-	    break;
-
-	case 'u':
-	    cf->run_uname = optarg;
-	    cp = strchr(optarg, ':');
-	    if (cp != NULL) {
-		if (cp == optarg)
-		    cf->run_uname = NULL;
-		cp[0] = '\0';
-		cp++;
-	    }
-	    cf->run_gname = cp;
-	    cf->run_uid = -1;
-	    cf->run_gid = -1;
-	    if (cf->run_uname != NULL) {
-		pp = getpwnam(cf->run_uname);
-		if (pp == NULL)
-		    err(1, "can't find ID for the user: %s", cf->run_uname);
-		cf->run_uid = pp->pw_uid;
-		if (cf->run_gname == NULL)
-		    cf->run_gid = pp->pw_gid;
-	    }
-	    if (cf->run_gname != NULL) {
-		gp = getgrnam(cf->run_gname);
-		if (gp == NULL)
-		    err(1, "can't find ID for the group: %s", cf->run_gname);
-		cf->run_gid = gp->gr_gid;
-	    }
-	    break;
-
-	case 'F':
-	    cf->no_check = 1;
-	    break;
-
-	case 'i':
-	    cf->ttl_mode = TTL_INDEPENDENT;
-	    break;
-
-	case 'n':
-	    if(strncmp("unix:", optarg, 5) == 0)
-		optarg += 5;
-	    if(strlen(optarg) == 0)
-		errx(1, "timeout notification socket name too short");
-	    cf->timeout_handler.socket_name = (char *)malloc(strlen(optarg) + 1);
-	    if(cf->timeout_handler.socket_name == NULL)
-		err(1, "can't allocate memory");
-	    strcpy(cf->timeout_handler.socket_name, optarg);
-	    break;
-
-	case 'P':
-	    cf->record_pcap = 1;
-	    break;
-
-	case 'a':
-	    cf->record_all = 1;
-	    break;
-
-	case 'd':
-	    cp = strchr(optarg, ':');
-	    if (cp != NULL) {
-		cf->log_facility = rtpp_log_str2fac(cp + 1);
-		if (cf->log_facility == -1)
-		    errx(1, "%s: invalid log facility", cp + 1);
-		*cp = '\0';
-	    }
-	    cf->log_level = rtpp_log_str2lvl(optarg);
-	    if (cf->log_level == -1)
-		errx(1, "%s: invalid log level", optarg);
-	    break;
-
-	case '?':
-	default:
-	    usage();
 	}
+
+    while ((ch = getopt(argc, argv, "vf2Rl:6:s:S:t:r:p:T:L:m:M:u:Fin:Pad:A:")) != -1) {
+		switch (ch) {
+			case 'f':
+			    cf->nodaemon = 1;
+			    break;
+
+			case 'l':
+			    bh[0] = optarg;
+			    bh[1] = strchr(bh[0], '/');
+
+			    if (bh[1] != NULL) {
+					*bh[1] = '\0';
+					bh[1]++;
+					cf->bmode = 1;
+			    }
+
+			    break;
+
+			case '6':
+			    bh6[0] = optarg;
+			    bh6[1] = strchr(bh6[0], '/');
+
+			    if (bh6[1] != NULL) {
+					*bh6[1] = '\0';
+					bh6[1]++;
+					cf->bmode = 1;
+			    }
+
+			    break;
+
+			case 'A':
+				cf->advaddr[0] = optarg;
+				cf->advaddr[1] = strchr(cf->advaddr[0], '/');
+
+				if (cf->advaddr[1] != NULL) {
+					*cf->advaddr[1] = '\0';
+					cf->advaddr[1]++;
+
+					if (*cf->advaddr[0] == 0) {
+						errx(1, "first advertised address is invalid");
+						exit(1);
+					} else if (*cf->advaddr[1] == 0) {
+						errx(1, "second advertised address is invalid");
+						exit(1);
+					}
+ 				} 
+
+ 				break;
+
+			case 's':
+			    if (strncmp("udp:", optarg, 4) == 0) {
+					cf->umode = 1;
+					optarg += 4;
+			    } else if (strncmp("udp6:", optarg, 5) == 0) {
+					cf->umode = 6;
+					optarg += 5;
+			    } else if (strncmp("unix:", optarg, 5) == 0) {
+					cf->umode = 0;
+					optarg += 5;
+			    }
+
+			    cmd_sock = optarg;
+			    break;
+
+			case 't':
+			    cf->tos = atoi(optarg);
+
+			    if (cf->tos > 255) {
+					errx(1, "%d: TOS is too large", cf->tos);
+				}
+
+			    break;
+
+			case '2':
+			    cf->dmode = 1;
+			    break;
+
+			case 'v':
+			    printf("Basic version: %d\n", CPROTOVER);
+
+			    for (i = 1; proto_caps[i].pc_id != NULL; ++i) {
+					printf("Extension %s: %s\n", proto_caps[i].pc_id,
+					    proto_caps[i].pc_description);
+			    }
+
+			    exit(0);
+			    break;
+
+			case 'r':
+			    cf->rdir = optarg;
+			    break;
+
+			case 'S':
+			    cf->sdir = optarg;
+			    break;
+
+			case 'R':
+			    cf->rrtcp = 0;
+			    break;
+
+			case 'p':
+			    pid_file = optarg;
+			    break;
+
+			case 'T':
+			    cf->max_ttl = atoi(optarg);
+			    break;
+
+			case 'L':
+			    cf->nofile_limit.rlim_cur = cf->nofile_limit.rlim_max = atoi(optarg);
+
+			    if (setrlimit(RLIMIT_NOFILE, &(cf->nofile_limit)) != 0)
+					err(1, "setrlimit");
+	
+			    if (getrlimit(RLIMIT_NOFILE, &(cf->nofile_limit)) != 0)
+					err(1, "getrlimit");
+
+			    if (cf->nofile_limit.rlim_max < atoi(optarg))
+					warnx("limit allocated by setrlimit (%d) is less than "
+					  "requested (%d)", (int) cf->nofile_limit.rlim_max,
+					  atoi(optarg));
+
+			    break;
+
+			case 'm':
+			    cf->port_min = atoi(optarg);
+			    break;
+
+			case 'M':
+			    cf->port_max = atoi(optarg);
+			    break;
+
+			case 'u':
+			    cf->run_uname = optarg;
+			    cp = strchr(optarg, ':');
+
+			    if (cp != NULL) {
+					if (cp == optarg) {
+					    cf->run_uname = NULL;
+					}
+
+					cp[0] = '\0';
+					cp++;
+			    }
+
+			    cf->run_gname = cp;
+			    cf->run_uid = -1;
+			    cf->run_gid = -1;
+
+			    if (cf->run_uname != NULL) {
+					pp = getpwnam(cf->run_uname);
+	
+					if (pp == NULL) {
+					    err(1, "can't find ID for the user: %s", cf->run_uname);
+					}
+
+					cf->run_uid = pp->pw_uid;
+					
+					if (cf->run_gname == NULL) {
+					    cf->run_gid = pp->pw_gid;
+					}
+			    }
+
+			    if (cf->run_gname != NULL) {
+					gp = getgrnam(cf->run_gname);
+	
+					if (gp == NULL) {
+					    err(1, "can't find ID for the group: %s", cf->run_gname);
+					}
+
+					cf->run_gid = gp->gr_gid;
+			    }
+
+			    break;
+
+			case 'F':
+			    cf->no_check = 1;
+			    break;
+
+			case 'i':
+			    cf->ttl_mode = TTL_INDEPENDENT;
+			    break;
+
+			case 'n':
+			    if(strncmp("unix:", optarg, 5) == 0) {
+					optarg += 5;
+				}
+	
+			    if(strlen(optarg) == 0) {
+					errx(1, "timeout notification socket name too short");
+				}
+
+			    cf->timeout_handler.socket_name = (char *)malloc(strlen(optarg) + 1);
+
+			    if(cf->timeout_handler.socket_name == NULL) {
+					err(1, "can't allocate memory");
+				}
+
+			    strcpy(cf->timeout_handler.socket_name, optarg);
+			    break;
+
+			case 'P':
+			    cf->record_pcap = 1;
+			    break;
+
+			case 'a':
+			    cf->record_all = 1;
+			    break;
+
+			case 'd':
+			    cp = strchr(optarg, ':');
+
+			    if (cp != NULL) {
+					cf->log_facility = rtpp_log_str2fac(cp + 1);
+	
+					if (cf->log_facility == -1) {
+					    errx(1, "%s: invalid log facility", cp + 1);
+					}
+
+					*cp = '\0';
+			    }
+
+			    cf->log_level = rtpp_log_str2lvl(optarg);
+			    
+			    if (cf->log_level == -1) {
+					errx(1, "%s: invalid log level", optarg);
+				}
+
+			    break;
+
+			case '?':
+			default:
+			    usage();
+		}
+	}
+
     if (cf->rdir == NULL && cf->sdir != NULL)
 	errx(1, "-S switch requires -r switch");
 
     if (cf->no_check == 0 && getuid() == 0 && cf->run_uname == NULL) {
-	if (cf->umode != 0) {
-	    errx(1, "running this program as superuser in a remote control "
-	      "mode is strongly not recommended, as it poses serious security "
-	      "threat to your system. Use -u option to run as an unprivileged "
-	      "user or -F is you want to run as a superuser anyway.");
-	} else {
-	    warnx("WARNING!!! Running this program as superuser is strongly "
-	      "not recommended, as it may pose serious security threat to "
-	      "your system. Use -u option to run as an unprivileged user "
-	      "or -F to surpress this warning.");
-	}
+		if (cf->umode != 0) {
+		    errx(1, "running this program as superuser in a remote control "
+		      "mode is strongly not recommended, as it poses serious security "
+		      "threat to your system. Use -u option to run as an unprivileged "
+		      "user or -F is you want to run as a superuser anyway.");
+		} else {
+		    warnx("WARNING!!! Running this program as superuser is strongly "
+		      "not recommended, as it may pose serious security threat to "
+		      "your system. Use -u option to run as an unprivileged user "
+		      "or -F to surpress this warning.");
+		}
     }
 
     /* make sure that port_min and port_max are even */
     if ((cf->port_min % 2) != 0)
-	cf->port_min++;
+		cf->port_min++;
+    
     if ((cf->port_max % 2) != 0) {
-	cf->port_max--;
+		cf->port_max--;
     } else {
-	/*
-	 * If port_max is already even then there is no
-	 * "room" for the RTCP port, go back by two ports.
-	 */
-	cf->port_max -= 2;
+		/*
+		 * If port_max is already even then there is no
+		 * "room" for the RTCP port, go back by two ports.
+		 */
+		cf->port_max -= 2;
     }
 
     if (cf->port_min <= 0 || cf->port_min > 65535)
-	errx(1, "invalid value of the port_min argument, "
-	  "not in the range 1-65535");
+		errx(1, "invalid value of the port_min argument, "
+		  "not in the range 1-65535");
     if (cf->port_max <= 0 || cf->port_max > 65535)
-	errx(1, "invalid value of the port_max argument, "
-	  "not in the range 1-65535");
+		errx(1, "invalid value of the port_max argument, "
+		  "not in the range 1-65535");
     if (cf->port_min > cf->port_max)
-	errx(1, "port_min should be less than port_max");
+		errx(1, "port_min should be less than port_max");
 
     cf->sessions = malloc((sizeof cf->sessions[0]) *
       (((cf->port_max - cf->port_min + 1) * 2) + 1));
@@ -365,10 +437,11 @@ init_config(struct cfg *cf, int argc, char **argv)
       (((cf->port_max - cf->port_min + 1) * 2) + 1));
 
     if (bh[0] == NULL && bh[1] == NULL && bh6[0] == NULL && bh6[1] == NULL) {
-	if (cf->umode != 0)
-	    errx(1, "explicit binding address has to be specified in UDP "
-	      "command mode");
-	bh[0] = "*";
+		if (cf->umode != 0)
+		    errx(1, "explicit binding address has to be specified in UDP "
+		      "command mode");
+
+		bh[0] = "*";
     }
 
     for (i = 0; i < 2; i++) {
@@ -380,32 +453,45 @@ init_config(struct cfg *cf, int argc, char **argv)
 
     i = ((bh[0] == NULL) ? 0 : 1) + ((bh[1] == NULL) ? 0 : 1) +
       ((bh6[0] == NULL) ? 0 : 1) + ((bh6[1] == NULL) ? 0 : 1);
+
     if (cf->bmode != 0) {
-	if (bh[0] != NULL && bh6[0] != NULL)
-	    errx(1, "either IPv4 or IPv6 should be configured for external "
-	      "interface in bridging mode, not both");
-	if (bh[1] != NULL && bh6[1] != NULL)
-	    errx(1, "either IPv4 or IPv6 should be configured for internal "
-	      "interface in bridging mode, not both");
-	if (i != 2)
-	    errx(1, "incomplete configuration of the bridging mode - exactly "
-	      "2 listen addresses required, %d provided", i);
+		if (bh[0] != NULL && bh6[0] != NULL) {
+		    errx(1, "either IPv4 or IPv6 should be configured for external "
+		      "interface in bridging mode, not both");
+		}
+
+		if (bh[1] != NULL && bh6[1] != NULL) {
+		    errx(1, "either IPv4 or IPv6 should be configured for internal "
+		      "interface in bridging mode, not both");
+		}
+
+		if (cf->advaddr[0] != NULL && cf->advaddr == NULL) {
+			errx(1, "two advertised addresses are required for internal "
+				"and external interfaces in bridging mode");
+		}
+		
+		if (i != 2) {
+		    errx(1, "incomplete configuration of the bridging mode - exactly "
+		      "2 listen addresses required, %d provided", i);
+		}
     } else if (i != 1) {
-	errx(1, "exactly 1 listen addresses required, %d provided", i);
+		errx(1, "exactly 1 listen addresses required, %d provided", i);
     }
 
     for (i = 0; i < 2; i++) {
-	cf->bindaddr[i] = NULL;
-	if (bh[i] != NULL) {
-	    cf->bindaddr[i] = malloc(sizeof(struct sockaddr_storage));
-	    setbindhost(cf->bindaddr[i], AF_INET, bh[i], SERVICE);
-	    continue;
-	}
-	if (bh6[i] != NULL) {
-	    cf->bindaddr[i] = malloc(sizeof(struct sockaddr_storage));
-	    setbindhost(cf->bindaddr[i], AF_INET6, bh6[i], SERVICE);
-	    continue;
-	}
+		cf->bindaddr[i] = NULL;
+
+		if (bh[i] != NULL) {
+		    cf->bindaddr[i] = malloc(sizeof(struct sockaddr_storage));
+		    setbindhost(cf->bindaddr[i], AF_INET, bh[i], SERVICE);
+		    continue;
+		}
+
+		if (bh6[i] != NULL) {
+		    cf->bindaddr[i] = malloc(sizeof(struct sockaddr_storage));
+		    setbindhost(cf->bindaddr[i], AF_INET6, bh6[i], SERVICE);
+		    continue;
+		}
     }
     if (cf->bindaddr[0] == NULL) {
 	cf->bindaddr[0] = cf->bindaddr[1];
