@@ -21,3 +21,12 @@
 *.i*86
 *.x86_64
 *.hex
+
+.deps/
+Makefile
+config.h
+config.log
+config.status
+makeann
+rtpproxy
+stamp-h1
